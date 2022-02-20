@@ -20,6 +20,7 @@ $rate_limited = false;
 
 if (!empty($status->resources)) {
 	$favorites_list = '/favorites/list';
+
 	if (!empty($status->resources->favorites->$favorites_list)) {
 		if (!empty($status->resources->favorites->$favorites_list->remaining)) {
 			dbug("Downloading oldest favorites");

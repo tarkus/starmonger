@@ -120,6 +120,7 @@ function setup_account($force_download = false) {
 			return setup_account(true);
 		}
 	}
+    $account->profile = load_user_profile_by_screen_name($account->screen_name);
 	return $account;
 }
 
@@ -138,7 +139,17 @@ function setup_timezone() {
 }
 
 function archive_oldest_favorites() {
-	global $twitter;
+	global $twitter, $account;
+
+    list($count) = query("
+        SELECT COUNT(*) AS count
+        FROM twitter_favorite
+    ");
+    $count = number_format($count->count);
+
+    dbug($account->profile->favourites_count. " favorites in total.");
+    dbug($count. " favorites downloaded.");
+
 	$params = array(
 		'count' => 200,
 		'tweet_mode' => 'extended'
@@ -174,6 +185,7 @@ function archive_newest_favorites() {
 function save_favorites($favs) {
 	global $db;
 	$ids = array();
+    dbug("Got " . count($favs));
 	foreach ($favs as $status) {
 		$ids[] = addslashes($status->id);
 	}
@@ -196,9 +208,12 @@ function save_favorites($favs) {
 		(id, user, content)
 		VALUES (?, ?, ?)
 	");
+    $skipped = 0;
 	foreach ($favs as $status) {
 		if (in_array($status->id, $existing_ids)) {
 			// TODO: update existing records, to account for new faves/RTs and updated usernames
+            $content = tweet_content($status);
+            $skipped += 1;
 			continue;
 		}
 		$user = strtolower($status->user->screen_name);
@@ -223,6 +238,7 @@ function save_favorites($favs) {
 		$profile_image = tweet_profile_image($status);
 	}
 	$db->commit();
+    dbug("Skipped " . $skipped);
 }
 
 function query($sql, $params = null) {
@@ -399,7 +415,7 @@ function tweet_content($status, $quoted = false) {
 		if ($entity->type == 'hashtags') {
 			$content .= "<a href=\"https://twitter.com/search?q=%23$entity->text&src=hash\" class=\"entity\">#<span class=\"text\">$entity->text</span></a>";
 		} else if ($entity->type == 'urls') {
-			if ($status->quoted_status) {
+			if (isset($status->quoted_status)) {
 				$quoted_username = $status->quoted_status->user->screen_name;
 				$quoted_id = $status->quoted_status->id;
 				$quoted_url = strtolower("https://twitter.com/$quoted_username/status/$quoted_id");
@@ -688,6 +704,7 @@ function can_display_tweet($tweet) {
 
 function local_media($tweet_id, $remote_url) {
 	$path = local_media_get_cached($tweet_id, $remote_url);
+
 	if ($path) {
 		return $path;
 	}
@@ -703,28 +720,45 @@ function local_media($tweet_id, $remote_url) {
 		local_media_set_cached($tweet_id, $remote_url, $path);
 		return $path;
 	}
-	$ch = curl_init();
-	curl_setopt($ch, CURLOPT_URL, $remote_url);
-	curl_setopt($ch, CURLOPT_HEADER, 0);
-	curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-	curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
-	curl_setopt($ch, CURLOPT_MAXREDIRS, 8);
-	$data = curl_exec($ch);
-	$info = curl_getinfo($ch);
-	curl_close($ch);
-	if ($info['http_code'] < 200 ||
-			$info['http_code'] > 299) {
-		dbug($info);
-		return false;
-	}
-	$dir = dirname($path);
+
+    $retry = 3;
+    $downloaded = false;
+    $ch = curl_init();
+    while ($retry) {
+        curl_setopt($ch, CURLOPT_URL, $remote_url);
+        curl_setopt($ch, CURLOPT_HEADER, 0);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
+        curl_setopt($ch, CURLOPT_MAXREDIRS, 8);
+        $data = curl_exec($ch);
+        $info = curl_getinfo($ch);
+
+        if ($info['http_code'] < 200 || $info['http_code'] > 299) {
+            dbug("Download media failed (with code " . $info['http_code'] . ") " . $remote_url);
+            $retry--;
+        } else {
+            dbug("Download media OK " . $remote_url);
+            $downloaded = true;
+            break;
+        }
+    } 
+    curl_close($ch);
+
+    if (!$downloaded) {
+        return false;
+    }
+
+    $path_parts = explode("?", $path);
+    $path_without_query = $path_parts[0];
+
+	$dir = dirname($path_without_query);
 	if (! file_exists($dir)) {
 		mkdir($dir, 0755, true);
 	}
 	if (! file_exists($dir)) {
 		return false;
 	}
-	file_put_contents($path, $data);
+	file_put_contents($path_without_query, $data);
 
 	local_media_set_cached($tweet_id, $remote_url, $path);
 
@@ -744,8 +778,12 @@ function local_media_get_cached($tweet_id, $remote_url) {
 				$media_redirect != $remote_url) {
 			return local_media($tweet_id, $media->redirect);
 		}
-		if (file_exists($media->path)) {
-			return $media->path;
+
+        $path_parts = explode("?", $media->path);
+        $path = $path_parts[0];
+
+		if (file_exists($path)) {
+			return $path;
 		} else {
 			query("
 				DELETE FROM twitter_media
@@ -790,6 +828,16 @@ function load_user_profile($id) {
 	global $twitter;
 	$rsp = $twitter->get('users/lookup', array(
 		'user_id' => $id
+	));
+	if (! empty($rsp) && is_array($rsp)) {
+		return $rsp[0];
+	}
+}
+
+function load_user_profile_by_screen_name($screen_name) {
+	global $twitter;
+	$rsp = $twitter->get('users/lookup', array(
+		'screen_name' => $screen_name
 	));
 	if (! empty($rsp) && is_array($rsp)) {
 		return $rsp[0];
