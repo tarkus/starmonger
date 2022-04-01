@@ -24,9 +24,9 @@ if (!empty($status->resources)) {
 	if (!empty($status->resources->favorites->$favorites_list)) {
 		if (!empty($status->resources->favorites->$favorites_list->remaining)) {
 			dbug("Downloading oldest favorites");
-			archive_oldest_favorites($verbose);
+			archive_oldest_favorites(true);
 			dbug("Downloading newest favorites");
-			archive_newest_favorites($verbose);
+			archive_newest_favorites(true);
 		} else {
 			$rate_limited = true;
 			$reset = date('Y-m-d H:i:s', $status->resources->favorites->$favorites_list->reset);

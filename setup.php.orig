@@ -6,24 +6,71 @@ function dbug($msg) {
 		$msg = print_r($msg, true);
 		$msg = trim($msg);
 	}
-	if (!empty($argv) &&
+	if (! empty($argv) &&
 	    in_array('--verbose', $argv)) {
-		echo "$msg\n"; }
-	if (!empty($_GET['verbose'])) {
+		echo "$msg\n";
+	}
+	if (! empty($_GET['verbose'])) {
 		echo "<pre>$msg\n</pre>";
 	}
 }
 
 function setup_db() {
 	global $config, $db;
-	$dsn = $config->database_path;
+	$filename = $config->database_path;
 	$curr_db_version = 3;
-	$db = new PDO($dsn, $config->database_username, $config->database_password);
-    if (!$db) {
-        echo "Uh oh, we couldn't open the database file.";
-        exit;
+	if (!file_exists($filename)) {
+		$db = new PDO("sqlite:$filename");
+		$db->query("
+			CREATE TABLE twitter_meta (
+				name VARCHAR(255) PRIMARY KEY,
+				value TEXT
+			);
+		");
+		$db->query("
+			CREATE TABLE twitter_favorite (
+				id INTEGER PRIMARY KEY,
+				href VARCHAR(255),
+				user VARCHAR(255),
+				content TEXT,
+				json TEXT,
+				protected INT,
+				created_at DATETIME,
+				saved_at DATETIME
+			);
+		");
+		$db->query("
+			CREATE INDEX twitter_favorite_index ON twitter_favorite (
+				id, created_at, saved_at
+			);
+		");
+		$db->query("
+			CREATE VIRTUAL TABLE twitter_favorite_search USING FTS3 (
+				id, user, content, tokenize=porter
+			);
+		");
+		$db->query("
+			CREATE TABLE twitter_media (
+				tweet_id INT,
+				href VARCHAR(255),
+				redirect VARCHAR(255),
+				path VARCHAR(255),
+				saved_at DATETIME
+			);
+		");
+		$db->query("
+			CREATE INDEX twitter_media_index ON twitter_media (
+				tweet_id, path
+			);
+		");
+		meta_set('db_version', $curr_db_version);
+	} else {
+		$db = new PDO("sqlite:$filename");
+		if (! $db) {
+			 echo "Uh oh, we couldn't open the database file.";
+			 exit;
+		}
 	}
-    meta_set('db_version', $curr_db_version);
 
 	$db_version = meta_get('db_version');
 	switch ($db_version) {
@@ -153,8 +200,13 @@ function save_favorites($favs) {
 	$db->beginTransaction();
 	$twitter_favorite = $db->prepare("
 		INSERT INTO twitter_favorite
-		(`id`, `href`, `user`, `content`, `json`, `created_at`, `saved_at`)
+		(id, href, user, content, json, created_at, saved_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
+	");
+	$twitter_favorite_search = $db->prepare("
+		INSERT INTO twitter_favorite_search
+		(id, user, content)
+		VALUES (?, ?, ?)
 	");
     $skipped = 0;
 	foreach ($favs as $status) {
@@ -177,6 +229,11 @@ function save_favorites($favs) {
 			$json,
 			date('Y-m-d H:i:s', $created_at),
 			date('Y-m-d H:i:s')
+		));
+		$twitter_favorite_search->execute(array(
+			$status->id,
+			$user,
+			$content
 		));
 		$profile_image = tweet_profile_image($status);
 	}
@@ -213,7 +270,13 @@ function check_setup() {
 	} else {
 		require_once "$root/config.php";
 		$config = (object) $config;
-        $db = setup_db();
+		if (!file_exists(dirname($config->database_path))) {
+			$issues[] = 'The database path directory doesn’t exist';
+		} else if (!is_writable(dirname($config->database_path))) {
+			$issues[] = 'The database path directory doesn’t allow write permissions';
+		} else {
+			$db = setup_db();
+		}
 	}
 	$twitter = setup_twitter();
 	if (!empty($twitter)) {
@@ -237,7 +300,15 @@ function check_setup() {
 function show_header($body_class = '') {
 	global $db, $rate_limited;
 	$q = '';
-	if ($body_class == 'setup') {
+	if (!empty($_GET['q'])) {
+		$q = htmlentities($_GET['q'], ENT_COMPAT, 'UTF-8');
+		list($count) = query("
+			SELECT COUNT(*) AS count
+			FROM twitter_favorite_search
+			WHERE twitter_favorite_search MATCH ?
+		", array($_GET['q']));
+		$count = number_format($count->count);
+	} else if ($body_class == 'setup') {
 		$count = 'setup';
 	} else {
 		list($count) = query("
@@ -269,12 +340,10 @@ function show_header($body_class = '') {
 		<div id="page">
 			<header>
 				<h1><a href="./" title="<?php echo $title_hover; ?>"><?php echo $title; ?></a></h1>
-<!--
 				<form action="./">
 					<input type="text" name="q" value="<?php echo $q; ?>">
 					<input type="submit" value="Search">
 				</form>
--->
 			</header>
 	<?php
 }
@@ -287,6 +356,10 @@ function show_footer($min_id = null, $max_id = null) {
 					<span class="earlier"><?php echo get_earlier_link($max_id); ?></span>
 					<span class="later"><?php echo get_later_link($min_id); ?></span>
 				<?php } ?>
+				<span class="credit">
+					<a href="https://github.com/dphiffer/starmonger">Starmonger</a> by
+					<a href="http://phiffer.org/">Dan Phiffer</a></span>
+				</span>
 				<?php
 				
 				if (!empty($rate_limited)) {
@@ -499,7 +572,7 @@ function get_earlier_id($max_id) {
 	}
 	$earlier = query("
 		SELECT id
-		FROM twitter_favorite
+		FROM twitter_favorite_search
 		WHERE id < ?
 		$search
 		ORDER BY id DESC
@@ -522,7 +595,7 @@ function get_later_id($min_id) {
 	}
 	$later = query("
 		SELECT id
-		FROM twitter_favorite
+		FROM twitter_favorite_search
 		WHERE id > ?
 		$search
 		ORDER BY id

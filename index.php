@@ -49,7 +49,6 @@ if (!empty($_GET['q'])) {
 		       twitter_favorite.protected AS protected,
 		       twitter_favorite.created_at AS created_at
 		FROM twitter_favorite,
-		     twitter_favorite_search
 		$where
 		ORDER BY twitter_favorite.id DESC
 		LIMIT 20
@@ -74,6 +73,7 @@ foreach ($favs as $index => $fav) {
 		$min_id = $fav->id;
 	}
 	$tweet = json_decode($fav->json);
+
 	if (! can_display_tweet($tweet)) {
 		continue;
 	}
