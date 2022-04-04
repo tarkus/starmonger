@@ -3,3 +3,5 @@ config.php
 /data/.DS_Store
 /data/starmonger.db
 /data/media
+vendor
+like.json

@@ -1,17 +1,17 @@
 <?php
 
+require "vendor/autoload.php";
+
+use Abraham\TwitterOAuth\TwitterOAuth;
+
+
 function dbug($msg) {
 	global $argv;
 	if (! is_scalar($msg)) {
 		$msg = print_r($msg, true);
 		$msg = trim($msg);
 	}
-	if (!empty($argv) &&
-	    in_array('--verbose', $argv)) {
-		echo "$msg\n"; }
-	if (!empty($_GET['verbose'])) {
-		echo "<pre>$msg\n</pre>";
-	}
+    echo "$msg\n";
 }
 
 function setup_db() {
@@ -41,15 +41,14 @@ function setup_db() {
 function setup_twitter() {
 	global $config;
 	$twitter = null;
-	if (class_exists('TwitterOAuth')) {
-		$twitter = new TwitterOAuth(
-			$config->twitter_consumer_key,
-			$config->twitter_consumer_secret,
-			$config->twitter_access_token,
-			$config->twitter_access_token_secret
-		);
-		$twitter->host = 'https://api.twitter.com/1.1/';
-	}
+    $twitter = new TwitterOAuth(
+        $config->twitter_consumer_key,
+        $config->twitter_consumer_secret,
+        $config->twitter_access_token,
+        $config->twitter_access_token_secret
+    );
+    $twitter->host = 'https://api.twitter.com/1.1/';
+    $twitter->setTimeouts(10, 15);
 	return $twitter;
 }
 
@@ -107,12 +106,14 @@ function archive_oldest_favorites() {
 		'count' => 200,
 		'tweet_mode' => 'extended'
 	);
-	$oldest_id = meta_get('oldest_id', 0);
+	$oldest_id = meta_get('oldest_id');
 	if ($oldest_id) {
-		$params['max_id'] = $oldest_id - 1;
+        $sub = gmp_sub($oldest_id, 1);
+		$params['max_id'] = gmp_strval($sub);
+        dbug("Fetching tweets until " . $params['max_id']);
 	}
 	$favs = $twitter->get("favorites/list", $params);
-	if (is_array($favs)) {
+	if ($favs && is_array($favs)) {
 		save_favorites($favs);
 		if (empty($favs)) {
 			meta_set('oldest_id', 0);
@@ -120,7 +121,9 @@ function archive_oldest_favorites() {
 			$len = count($favs);
 			meta_set('oldest_id', $favs[$len - 1]->id);
 		}
-	}
+    } else {
+        dbug($favs);
+    }
 }
 
 function archive_newest_favorites() {
@@ -133,6 +136,80 @@ function archive_newest_favorites() {
 	if (is_array($favs)) {
 		save_favorites($favs);
 	}
+}
+
+function save_archived($info) {
+	global $db, $twitter;
+
+    try {
+        $db->beginTransaction();
+    } catch(Exception $e) {
+       // pass 
+    }
+
+    $status = $twitter->get('/statuses/show/' . $info->tweetId);
+
+    if (!empty($status->errors)) {
+        $twitter_favorite = $db->prepare("
+            INSERT INTO twitter_favorite
+            (`id`, `href`, `user`, `content`, `saved_at`)
+            VALUES (?, ?, ?, ?, ?)
+        ");
+
+        if ($status->errors[0]->code == 63) {
+            $user = 'SUSPENDED';
+        } else if ($status->errors[0]->code == 179) {
+            $user = 'PROTECTED';
+        } else if ($status->errors[0]->code == 34) {
+            $user = 'UNKNOWN';
+        } else if ($status->errors[0]->code == 144) {
+            $user = 'UNKNOWN';
+        } else {
+            dbug($info);
+            dbug($status->errors);
+            return;
+        }
+
+        $twitter_favorite->execute(array(
+            $info->tweetId,
+            $info->expandedUrl,
+            $user,
+            $info->fullText,
+            date('Y-m-d H:i:s')
+        ));
+        $saved = $db->lastInsertId();
+        $db->commit();
+        dbug("Saved suspended or protected " . (string) $info->tweetId);
+        return $saved;
+    }
+
+	$twitter_favorite = $db->prepare("
+		INSERT INTO twitter_favorite
+		(`id`, `href`, `user`, `content`, `json`, `created_at`, `saved_at`)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	");
+
+    $user = $status->user->screen_name;
+    $href = "https://twitter.com/i/web/status/$status->id";
+    $content = tweet_content($status);
+    $json = json_encode($status);
+    $created_at = strtotime($status->created_at);
+
+    $twitter_favorite->execute(array(
+        $status->id,
+        $href,
+        $user,
+        $content,
+        $json,
+        date('Y-m-d H:i:s', $created_at),
+        date('Y-m-d H:i:s')
+    ));
+    $profile_image = tweet_profile_image($status);
+    $saved = $db->lastInsertId();
+	$db->commit();
+
+    dbug("Saved " . $status->id);
+    return $saved;
 }
 
 function save_favorites($favs) {
@@ -164,13 +241,15 @@ function save_favorites($favs) {
             $skipped += 1;
 			continue;
 		}
+        $tweet_id = $status->id_str;
+        dbug("Saving " . $tweet_id);
 		$user = strtolower($status->user->screen_name);
-		$href = "https://twitter.com/$user/statuses/$status->id";
+		$href = "https://twitter.com/$user/statuses/" . $tweet_id;
 		$content = tweet_content($status);
 		$json = json_encode($status);
 		$created_at = strtotime($status->created_at);
 		$twitter_favorite->execute(array(
-			$status->id,
+			$tweet_id,
 			$href,
 			$user,
 			$content,
@@ -199,14 +278,12 @@ function check_setup() {
 	global $config, $db, $twitter, $account;
 	$root = __DIR__;
 	$issues = array();
-	if (!file_exists("$root/twitteroauth/twitteroauth/twitteroauth.php")) {
+	if (!file_exists("$root/vendor/abraham/twitteroauth/src/TwitterOAuth.php")) {
 		if (!file_exists("$root/.git")) {
 			$issues[] = 'Download and unzip <a href="https://github.com/abraham/twitteroauth/archive/master.zip">twitteroauth</a> library into this directory';
 		} else {
 			$issues[] = "To automatically download <a href=\"https://github.com/abraham/twitteroauth\">twitteroauth</a> dependency, type the following into the command line:<br><code><pre>cd $root\ngit submodule init\ngit submodule update</pre></code>";
 		}
-	} else {
-		require_once "$root/twitteroauth/twitteroauth/twitteroauth.php";
 	}
 	if (!file_exists("$root/config.php")) {
 		$issues[] = 'Rename config-example.php to config.php end edit with your Twitter API credentials';
@@ -454,7 +531,7 @@ function tweet_permalink($status) {
 	} else if ($time_diff < 60 * 60 * 24) {
 		$label = floor($time_diff / (60 * 60)) . 'hr';
 	} else {
-		$label = date('M j', $timestamp);
+		$label = date('M j Y', $timestamp);
 	}
 	return "<a href=\"$url\" title=\"$date_time\">$label</a>";
 }
@@ -550,7 +627,7 @@ function long_enough_since_last_check() {
 
 function meta_get($name) {
 	global $_meta_cache;
-	if (empty($_meta_cache)) {
+	if (empty($_meta_cache) || !isset($_meta_cache[$name])) {
 		$_meta_cache = array();
 		$twitter_meta = query("
 			SELECT name, value
@@ -563,8 +640,8 @@ function meta_get($name) {
 	$value = null;
 	if (isset($_meta_cache[$name])) {
 		$value = $_meta_cache[$name];
-	}
-	return $value;
+        return $value;
+    }
 }
 
 function meta_set($name, $value) {

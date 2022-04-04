@@ -72,31 +72,62 @@ foreach ($favs as $index => $fav) {
 	if ($index == 0) {
 		$min_id = $fav->id;
 	}
-	$tweet = json_decode($fav->json);
 
-	if (! can_display_tweet($tweet)) {
-		continue;
-	}
-	$content = tweet_content($tweet);
-	$profile_image = tweet_profile_image($tweet);
-	$permalink = tweet_permalink($tweet);
-	echo "
-		<article id=\"tweet-$fav->id\" class=\"tweet\">
-			<div class=\"content\">
-				<div class=\"user\">
-					<a href=\"https://twitter.com/$fav->user\">
-						<img src=\"$profile_image\" class=\"profile_image\">
-						<span class=\"name\">{$tweet->user->name}</span>
-						<span class=\"screen_name\">@$fav->user</span>
-					</a>
-					<span class=\"meta\">&middot; $permalink</span>
-				</div>
-				<div class=\"text\">
-					$content
-				</div>
-			</div>
-		</article>
-	";
+    if ($fav->json) {
+        $tweet = json_decode($fav->json);
+
+        if (! can_display_tweet($tweet)) {
+            continue;
+        }
+        $screen_name = $tweet->user->name;
+        $user_name = $fav->user;
+        $user_link = "https://twitter.com/{$fav->user}";
+        $content = tweet_content($tweet);
+        $profile_image = tweet_profile_image($tweet);
+        $permalink = tweet_permalink($tweet);
+
+        echo "
+            <article id=\"tweet-{$fav->id}\" class=\"tweet\">
+                <div class=\"content\">
+                    <div class=\"user\">
+                        <a href=\"{$user_link}\">
+                            <img src=\"{$profile_image}\" class=\"profile_image\">
+                            <span class=\"name\">{$screen_name}</span>
+                            <span class=\"screen_name\">@{$user_name}</span>
+                        </a>
+                        <span class=\"meta\">&middot; {$permalink}</span>
+                    </div>
+                    <div class=\"text\">
+                        {$content}
+                    </div>
+                </div>
+            </article>
+        ";
+    } else {
+        $screen_name = $fav->user;
+        $user_name = $fav->user;
+        $user_link = "#";
+        $content = $fav->content;
+        $profile_image = "https://abs.twimg.com/sticky/default_profile_images/default_profile_normal.png";
+        $permalink = "<a href=\"{$fav->href}\">➱</a>";
+
+        echo "
+            <article id=\"tweet-{$fav->id}\" class=\"tweet\">
+                <div class=\"content\">
+                    <div class=\"user\">
+                        <a href=\"{$user_link}\">
+                            <img src=\"{$profile_image}\" class=\"profile_image\">
+                            <span class=\"name\">{$user_name}</span>
+                            <span class=\"meta\">&middot; {$permalink}</span>
+                        </a>
+                    </div>
+                    <div class=\"text\">
+                        {$content}
+                    </div>
+                </div>
+            </article>
+        ";
+    }
 }
 
 if (!empty($fav)) {
